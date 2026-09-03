@@ -41,6 +41,16 @@ commit, not from `main` — the two variants differ (the 26.6 backport of CVE-20
 `setEmailVerified` call that `main` had already moved elsewhere), and taking `main`'s is a silent
 regression.
 
+Take the whole patch set for the flow, not just the CVE commit. When the change re-enables an
+attack surface, cherry-pick every upstream fix that landed on it — `26.6.4-inform.1` took
+`869c3fd21f` (rollback when reset-credentials token verification fails, no CVE ID, 26.6.5)
+alongside the CVE fix `62dd952e6c` (26.6.6). Find them by **flow, not by path**: a `git log`
+scoped to the obvious directory misses them, because `869c3fd21f` lives in
+`services/managers/AuthenticationManager.java` and `services/ErrorPageException.java`, nowhere
+near `authenticators/resetcred/`. Anything protective left out on purpose goes in the PR body as a
+documented exclusion — for that tag, `fccbaba040`, which changes the `BruteForceProtector` SPI
+signature and lockout semantics and would invalidate the tested baseline.
+
 The patch goes in through a **PR against the release branch**, so the change is reviewed and the
 reasoning is on the record for the vulnerability register:
 
