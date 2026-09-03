@@ -41,17 +41,44 @@ commit, not from `main` — the two variants differ (the 26.6 backport of CVE-20
 `setEmailVerified` call that `main` had already moved elsewhere), and taking `main`'s is a silent
 regression.
 
+The patch goes in through a **PR against the release branch**, so the change is reviewed and the
+reasoning is on the record for the vulnerability register:
+
 ```bash
 git fetch upstream --tags
-git switch -c release/26.6.4-inform 26.6.4
-git cherry-pick -s 62dd952e6c                     # upstream's own 26.6-line commit
-git diff --stat 26.6.4 HEAD                       # expect only the intended files
-git show HEAD | git patch-id --stable             # must match `git show 62dd952e6c | git patch-id --stable`
-git tag 26.6.4-inform.1
-git push -u origin release/26.6.4-inform && git push origin 26.6.4-inform.1
+git branch release/26.6.4-inform 26.6.4          # base: the bare upstream tag, no commits of ours
+git switch -c fix/cve-2026-18963 release/26.6.4-inform
+git cherry-pick -s 62dd952e6c                    # upstream's own 26.6-line commit
+git diff --stat release/26.6.4-inform HEAD       # expect only the intended files
+git show HEAD | git patch-id --stable            # must match `git show 62dd952e6c | git patch-id --stable`
+git push -u origin release/26.6.4-inform
+git push -u origin fix/cve-2026-18963
+gh pr create --base release/26.6.4-inform --head fix/cve-2026-18963   # body: why THIS upstream commit
+```
+
+A base branch with none of our commits on it is the point: the PR diff is then exactly the patch.
+**Merge with rebase** (or fast-forward locally and push) — squashing rewrites the commit, losing
+the upstream author and their `Signed-off-by` and breaking the `patch-id` equality with upstream
+that is the whole audit argument; a merge commit leaves the branch head no longer "upstream tag
+plus one upstream commit". Then re-check the `patch-id` on the merged head, tag it, and dispatch:
+
+```bash
+git switch release/26.6.4-inform && git pull --ff-only
+git show HEAD | git patch-id --stable            # same id as before the merge
+git tag 26.6.4-inform.1 && git push origin 26.6.4-inform.1
 ```
 
 Then dispatch with `tag: 26.6.4-inform.1` and no `image-tag`.
+
+What the PR costs and gives, in this fork specifically: the repo is public, so GitHub-hosted
+minutes are free, and `ci.yml` also fires on `push` to any non-`main` branch — so pushing the base
+branch alone kicks off a full CI run on content identical to upstream. The PR itself runs Keycloak
+CI, Documentation, Guides and JS CI (CodeQL is `pull_request: branches: [main]` and stays out).
+That is worth having rather than tolerating: **Base IT** runs the old arquillian suite, so it
+executes the upstream regression test that comes with the cherry-pick. The `Testsuite Deprecation
+Check` tolerates a cherry-pick that touches `testsuite/` as long as it adds no new file there and
+under 100 lines to any single one. Do not let a flaky Base IT group hold up the tag — the gates
+that matter are the diff, the `patch-id`, and that one regression test.
 
 **Do not run `set-version.sh`** — leave the pom at the upstream version. The image is scanned by
 Amazon Inspector via ECR, which matches `org.keycloak:*` jar coordinates against advisory ranges;
