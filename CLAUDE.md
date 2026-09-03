@@ -80,15 +80,68 @@ git tag 26.6.4-inform.1 && git push origin 26.6.4-inform.1
 
 Then dispatch with `tag: 26.6.4-inform.1` and no `image-tag`.
 
-What the PR costs and gives, in this fork specifically: the repo is public, so GitHub-hosted
-minutes are free, and `ci.yml` also fires on `push` to any non-`main` branch — so pushing the base
-branch alone kicks off a full CI run on content identical to upstream. The PR itself runs Keycloak
-CI, Documentation, Guides and JS CI (CodeQL is `pull_request: branches: [main]` and stays out).
-That is worth having rather than tolerating: **Base IT** runs the old arquillian suite, so it
-executes the upstream regression test that comes with the cherry-pick. The `Testsuite Deprecation
-Check` tolerates a cherry-pick that touches `testsuite/` as long as it adds no new file there and
-under 100 lines to any single one. Do not let a flaky Base IT group hold up the tag — the gates
-that matter are the diff, the `patch-id`, and that one regression test.
+CI on the PR is free (the fork is public) and is the regression evidence for the cherry-picks —
+see **CI on backport branches** below for which checks to read and which are known false positives.
+
+### CI on backport branches
+
+Six workflows can fire on a `fix/**` or `release/**` branch; everything else in
+`.github/workflows/` is `workflow_dispatch`/`schedule`/`workflow_call` only, and `Weblate Sync` is
+filtered to `main`. Three of the six are **disabled in the fork's Actions settings** — a
+repository setting, deliberately not a file edit, so it creates no upstream merge conflict:
+
+| Workflow                 | State        | Why                                                       |
+|--------------------------|--------------|-----------------------------------------------------------|
+| `Keycloak CI`            | enabled      | All server-side coverage; the only checks that matter here |
+| `Keycloak Operator CI`   | enabled      | Relevant if a backport touches `operator/`                |
+| `CodeQL`                 | enabled      | Static analysis of the backported code (push event only)  |
+| `Keycloak JavaScript CI` | **disabled** | Cannot pass on a backport branch — see below              |
+| `Keycloak Documentation` | **disabled** | Asciidoc only; nothing reaches the image, and its `External links check` fails on flaky live HTTP |
+| `Keycloak Guides`        | **disabled** | Same                                                      |
+
+Re-enable with `gh workflow enable "<name>" --repo Inform-Software/keycloak`.
+
+**Why JS CI can never pass here.** `js-ci.yml` hardcodes `keycloak-999.0.0-SNAPSHOT.tar.gz` in
+eight places — the `mv` at :58, the artifact path, and the `tar xfvz` plus `kc.sh` path in each of
+the three E2E jobs. Upstream never trips over it because CI only ever runs on trees whose pom is
+`999.0.0-SNAPSHOT`: `release/26.x` branches stay at the snapshot version, and the stamped pom
+exists only on the `Set version to X` tag commits, which upstream never builds. A backport branch
+starts *at* such a tag, so its pom is a real version and the `mv` fails. The three E2E jobs
+(Admin UI, Account UI, admin-client against a live server) then never run — they report `skipped`,
+so that coverage was never there to lose. What disabling does cost is four jobs that do work on a
+stamped tree: `Admin Client`, `UI Shared`, `Account UI` (lint + build) and `Admin UI` (lint + unit
+tests + build). Those only matter for a cherry-pick that touches `js/`, `themes/` or
+`rest/admin-ui-ext/` — the fork has done one (`fix/45333-user-admin-events-ui-fix`). For such a
+backport, either re-enable JS CI for that PR or run the equivalent locally:
+`pnpm -C js install && pnpm -C js/apps/admin-ui lint && … test && … build`.
+
+**Which checks to read.** The **pull_request**-event `Keycloak CI` run, and inside it:
+
+- `Forms IT (chrome)` / `Forms IT (firefox)` — `forms-suite` is `org.keycloak.testsuite.forms.**`,
+  so this is where `ResetPasswordTest` and friends actually run. **Not** `Base IT`, whose
+  `base-suite` excludes that package.
+- `Base IT (1..6)` — broad arquillian coverage; the best signal for collateral damage from a
+  cherry-pick that touches shared code.
+- `Testsuite Deprecation Check` — passes as long as the pick adds no new file under `testsuite/`
+  and under 100 lines to any single one.
+- `Status Check - Keycloak CI` — the aggregate; `if: always()` over 25 job groups.
+
+**Known false positive: `Keycloak CI / SSSD` on push events.** `conditional.sh` only diffs for
+refs matching `refs/pull/N/merge`; for anything else it prints "Not a pull request, marking
+everything as changed" and forces every conditional job on. So a push to a backport branch runs
+`SSSD`, which needs a FreeIPA server plus the weekly `ipa-data-<year>-<week>` cache that only
+upstream's own runs populate, and fails in its `Run tests` step after ~2 minutes. It drags
+`Status Check - Keycloak CI (push)` red with it. Nothing to fix fork-side; ignore it unless a
+backport actually touches `federation/sssd/`, in which case test manually. The flip side of the
+same behaviour is that the push run exercises groups the PR run skips (store model, volatile
+sessions, external Infinispan, Quarkus UT, admin v2, cluster compatibility), so it is worth
+reading despite the red aggregate.
+
+**Do not put required status checks in a branch ruleset.** The push and pull_request runs publish
+check runs with the *same name* on the *same SHA*, so a required `Status Check - Keycloak CI`
+resolves nondeterministically to whichever finished last — and the fork's PAT gets
+`403 Resource not accessible` on the Checks API, so a stuck merge is hard to diagnose. Gate on a
+human reading the PR-event run instead.
 
 **Do not run `set-version.sh`** — leave the pom at the upstream version. The image is scanned by
 Amazon Inspector via ECR, which matches `org.keycloak:*` jar coordinates against advisory ranges;
