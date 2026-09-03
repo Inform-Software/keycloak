@@ -34,28 +34,48 @@ already stamped, so the pom, the tarball, the image tag and the `version` label 
 
 ### Case B — fork changes on top of a release
 
-A branch like `fix/26.6.4-fix` is upstream tag `26.6.4` plus cherry-picks, and its pom still reads
-`26.6.4` — an image built from it would be indistinguishable from upstream's. Give it its own
-identity before publishing:
+One long-lived branch per patched upstream release, in upstream's own `release/*` namespace:
+`release/<version>-inform` is upstream tag `<version>` plus cherry-picks, and each published
+build is a tag `<version>-inform.<n>` on it. Cherry-pick from the upstream **release-line**
+commit, not from `main` — the two variants differ (the 26.6 backport of CVE-2026-18963 keeps a
+`setEmailVerified` call that `main` had already moved elsewhere), and taking `main`'s is a silent
+regression.
 
 ```bash
-git switch -c release/26.6.4-INFORM origin/fix/26.6.4-fix
-./set-version.sh 26.6.4-INFORM-1     # rewrites all poms, project.version.npm, docs attrs, 4 package.json
-git commit -am "Set version to 26.6.4-INFORM-1"
-git tag 26.6.4-INFORM-1
-git push origin 26.6.4-INFORM-1
+git fetch upstream --tags
+git switch -c release/26.6.4-inform 26.6.4
+git cherry-pick -s 62dd952e6c                     # upstream's own 26.6-line commit
+git diff --stat 26.6.4 HEAD                       # expect only the intended files
+git show HEAD | git patch-id --stable             # must match `git show 62dd952e6c | git patch-id --stable`
+git tag 26.6.4-inform.1
+git push -u origin release/26.6.4-inform && git push origin 26.6.4-inform.1
 ```
 
-Then dispatch with `tag: 26.6.4-INFORM-1` and no `image-tag`. Keep the version-bump commit a
-**leaf** — tagged, never merged back — which is what upstream does (release branches stay at
-`999.0.0-SNAPSHOT`). Naming convention: reuse upstream's version string when the build is
-identical to upstream, otherwise add an `-INFORM-n` postfix (see tags `22.0.1-INFORM-1`,
-`22.0.3-INFORM-1`).
+Then dispatch with `tag: 26.6.4-inform.1` and no `image-tag`.
 
-Everything downstream follows automatically: `dist.archive.file.version` and
-`dist.archive.dir.version` default to `${project.version}` (`pom.xml`), so you get
-`keycloak-26.6.4-INFORM-1.tar.gz` with a matching inner directory, which is what the workflow's
-`cp` glob and the Dockerfile's `mv /tmp/keycloak/keycloak-*` both expect.
+**Do not run `set-version.sh`** — leave the pom at the upstream version. The image is scanned by
+Amazon Inspector via ECR, which matches `org.keycloak:*` jar coordinates against advisory ranges;
+a non-standard qualifier orders ambiguously (semver puts a prerelease *below* `26.6.4`, Maven's
+`ComparableVersion` puts an unknown qualifier *above* it), so stamping can re-open every advisory
+fixed in exactly `26.6.4` as a fresh finding. Canonical coordinates keep the report identical to
+stock upstream plus the one backported CVE, which is a false positive that must be suppressed
+either way — a backported fix is invisible to SBOM scanning regardless of the version string.
+
+Identity therefore lives outside the jars: the git tag, the image tag, and the `version` /
+`org.opencontainers.image.version` / `.revision` labels the workflow writes from the dispatch
+input. That is what the consumer expects — its `Dockerfile` documents `KEYCLOAK_VERSION` (base
+image tag) diverging from `KEYCLOAK_EXTENSIONS_VERSION` on a backport base, and sets the
+admin-console footer string itself via `<keycloak.base.version>`. The accepted cost is that
+`kc.sh --version` inside the container reads the plain upstream version, so patched vs stock is
+told apart only by tag and labels.
+
+The unstamped tarball is `keycloak-<version>.tar.gz` (`dist.archive.{file,dir}.version` default to
+`${project.version}`), which the workflow's `cp quarkus/dist/target/keycloak-*.tar.gz` and the
+Dockerfile's `tar -xvf … keycloak-*.tar.gz` / `mv /tmp/keycloak/keycloak-*` handle as globs.
+
+Naming: reuse upstream's version string when the build is identical to upstream, otherwise
+`-inform.<n>`. Tags `22.0.1-INFORM-1` and `22.0.3-INFORM-1` predate this convention and were
+pom-stamped; they stay as they are.
 
 ### Constraints and traps in the publish workflow
 
@@ -75,11 +95,11 @@ Everything downstream follows automatically: `dist.archive.file.version` and
   differs per tag (22.x's copy uses the retired `actions/upload-artifact@v3`); the latter does not
   exist before 26.0.6, and a missing local action is a fatal step error. There is a comment in the
   workflow saying so — leave it there.
-- `set-version.sh` seds `ENV KEYCLOAK_VERSION` in `quarkus/container/Dockerfile`. That became a
-  no-op in 26.2.0, when the Dockerfile switched to `ARG KEYCLOAK_VERSION=999.0.0-SNAPSHOT`; on
-  22.x through 26.1.x the `ENV` line is still there and the sed does fire. Either way it does not
-  matter here, because the workflow passes `--build-arg KEYCLOAK_VERSION` explicitly. Left alone
-  on purpose — it is an upstream-owned file.
+- `set-version.sh` is not part of the flow any more (see Case B), so its `ENV KEYCLOAK_VERSION`
+  sed on `quarkus/container/Dockerfile` never fires here. It would be a no-op anyway from 26.2.0
+  on, when that Dockerfile switched to `ARG KEYCLOAK_VERSION=999.0.0-SNAPSHOT`, and the workflow
+  passes `--build-arg KEYCLOAK_VERSION` explicitly regardless. Left alone on purpose — it is an
+  upstream-owned file.
 
 ## Building
 
