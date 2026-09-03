@@ -126,16 +126,28 @@ backport, either re-enable JS CI for that PR or run the equivalent locally:
   and under 100 lines to any single one.
 - `Status Check - Keycloak CI` — the aggregate; `if: always()` over 25 job groups.
 
-**Known false positive: `Keycloak CI / SSSD` on push events.** `conditional.sh` only diffs for
+**Push-event runs are flaky — triage before believing them.** `conditional.sh` only diffs for
 refs matching `refs/pull/N/merge`; for anything else it prints "Not a pull request, marking
-everything as changed" and forces every conditional job on. So a push to a backport branch runs
-`SSSD`, which needs a FreeIPA server plus the weekly `ipa-data-<year>-<week>` cache that only
-upstream's own runs populate, and fails in its `Run tests` step after ~2 minutes. It drags
-`Status Check - Keycloak CI (push)` red with it. Nothing to fix fork-side; ignore it unless a
-backport actually touches `federation/sssd/`, in which case test manually. The flip side of the
-same behaviour is that the push run exercises groups the PR run skips (store model, volatile
-sessions, external Infinispan, Quarkus UT, admin v2, cluster compatibility), so it is worth
-reading despite the red aggregate.
+everything as changed" and forces every conditional job on. That cuts both ways: the push run
+exercises groups the PR run skips (store model, volatile sessions, external Infinispan, Quarkus
+UT/IT, admin v2, cluster compatibility), and it also runs jobs whose infrastructure this fork does
+not have, on far more surface than the diff touches. Observed so far on backport branches:
+
+- `SSSD` — needs a FreeIPA server plus the weekly `ipa-data-<year>-<week>` cache that only
+  upstream's own runs populate. It **failed on one push and passed on the next for the same
+  tree**, so treat it as flaky, not as a standing false positive.
+- `Quarkus IT` — its step runs `./mvnw test -pl quarkus/tests/integration …` **without**
+  `${SUREFIRE_RETRY}`, unlike Base IT and Forms IT which pass
+  `-Dsurefire.rerunFailingTestsCount=2`. One flaky test therefore fails the whole job with no
+  automatic rerun; `LoggingDistTest.httpAccessLogMaskedCookiesDiffFormat` did exactly that by
+  asserting on the server's stdout without waiting for the asynchronous access-log flush. Quarkus
+  IT never runs on the PR event for a `services/`-only diff (`ci-quarkus` is false).
+
+Assume any push-run job can flake. When one goes red, either re-run it
+(`gh run rerun --job <id> --repo Inform-Software/keycloak`) and see if it clears, or read the log
+and identify the failing test: **if it has nothing to do with the backported code, accept it and
+proceed.** The gate is the pull_request-event run, and a red `Status Check - Keycloak CI (push)`
+blocks nothing as long as required status checks stay out of the ruleset (below).
 
 **Do not put required status checks in a branch ruleset.** The push and pull_request runs publish
 check runs with the *same name* on the *same SHA*, so a required `Status Check - Keycloak CI`
