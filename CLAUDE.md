@@ -75,10 +75,32 @@ plus one upstream commit". Then re-check the `patch-id` on the merged head, tag 
 ```bash
 git switch release/26.6.4-inform && git pull --ff-only
 git show HEAD | git patch-id --stable            # same id as before the merge
-git tag 26.6.4-inform.1 && git push origin 26.6.4-inform.1
+git tag -a 26.6.4-inform.1 -m "26.6.4 plus upstream 869c3fd21f and 62dd952e6c (CVE-2026-18963)"
+git push origin 26.6.4-inform.1
 ```
 
-Then dispatch with `tag: 26.6.4-inform.1` and no `image-tag`.
+Annotated (`-a`), not lightweight: the tag object then carries the message and, if commit signing is
+configured, the signature — and `git push` preserves both. Then dispatch, from `main` where the
+workflow file lives; it checks out the tag itself:
+
+```bash
+gh workflow run publish-backport-image.yml --repo Inform-Software/keycloak -f tag=26.6.4-inform.1
+```
+
+No `image-tag` — it defaults to `tag`, which is what keeps the image tag and the `version` /
+`revision` labels agreeing. **The fine-grained PAT has no write access to this repo**: the tag push,
+the release and the dispatch all fail with `403 … denied`, so they have to be run by hand. Reads
+are unaffected, so `gh run watch` on the dispatched run still works.
+
+Optionally publish a **GitHub Release** on the tag. It has no effect on the build — nothing listens
+on `release:` or `create:`, and `ci.yml`'s `push:` uses `branches-ignore:`, which matches branch
+pushes only, so even the tag push runs no CI — but it gives the vulnerability register a citable
+page naming the picks. Create it *on the already-pushed tag*, so the annotated object survives;
+`gh release create` on a missing tag makes a lightweight one, and `--target` then needs the SHA,
+never the branch name. Skip `--generate-notes`: the fork has no earlier release, so it has nothing
+to diff against and enumerates the whole mirrored upstream history. Reference the picks as
+`keycloak/keycloak@<full sha>` — GitHub autolinks that cross-repo form, while a SHA in backticks
+stays plain text. `26.6.4-inform.1` (PR #6, tagged at `1432d568e8`) is the worked example.
 
 CI on the PR is free (the fork is public) and is the regression evidence for the cherry-picks —
 see **CI on backport branches** below for which checks to read and which are known false positives.
