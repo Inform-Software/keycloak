@@ -130,9 +130,12 @@ public class Profile {
 
         TRANSIENT_USERS("Transient users for brokering", Type.EXPERIMENTAL),
 
+        LOGIN_FAILURES_V1("In-memory login failures", Type.DEPRECATED, 1, FeatureUpdatePolicy.SHUTDOWN),
+        LOGIN_FAILURES_V2("Persistent login failures", Type.DEFAULT, 2, FeatureUpdatePolicy.SHUTDOWN),
+
         MULTI_SITE("Multi-site support", Type.DISABLED_BY_DEFAULT, FeatureUpdatePolicy.SHUTDOWN),
 
-        STATELESS("Stateless (stores authentication sessions, action tokens and login failure data in the database, allowing multiple clusters to be connected with just the database)", Type.PREVIEW, FeatureUpdatePolicy.SHUTDOWN),
+        STATELESS("Stateless (stores authentication sessions, action tokens and login failure data in the database, allowing multiple clusters to be connected with just the database)", Type.PREVIEW, FeatureUpdatePolicy.SHUTDOWN, Feature.LOGIN_FAILURES_V2),
 
         CLUSTERLESS("Store all session data, work cache and login failure data in an external Infinispan cluster.", Type.EXPERIMENTAL, FeatureUpdatePolicy.SHUTDOWN),
 
@@ -145,6 +148,7 @@ public class Profile {
         OID4VC_VCI("Support for the OID4VCI protocol as part of OID4VC.", Type.EXPERIMENTAL),
         OID4VC_VCI_PREAUTH_CODE("Support for credential offers with `pre-authorized_code` grant.", Type.EXPERIMENTAL, OID4VC_VCI),
         OID4VC_VCI_REST_CREDENTIAL_OFFER("Support for the REST endpoint to create credential offers.", Type.EXPERIMENTAL, OID4VC_VCI),
+        OID4VC_MDOC("Support for OID4VC `mso_mdoc` credential type.", Type.EXPERIMENTAL), // Dependent on either VCI or VP, does nothing if neither is active
         OID4VC_VP("Support for the OID4VP protocol as part of OID4VC.", Type.EXPERIMENTAL),
 
         OPENTELEMETRY("OpenTelemetry support", Type.DEFAULT),

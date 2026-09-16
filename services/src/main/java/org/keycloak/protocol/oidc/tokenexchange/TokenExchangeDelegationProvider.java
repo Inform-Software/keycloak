@@ -70,6 +70,11 @@ public class TokenExchangeDelegationProvider extends StandardTokenExchangeProvid
     }
 
     @Override
+    protected void validateSubjectToken(AccessToken subjectToken) {
+        // Delegation legitimately exchanges tokens carrying "may_act". The allowed actor is validated separately in validateMayAct() using the actor_token. So permit these tokens here, overriding the standard rejection of delegation subject tokens.
+    }
+
+    @Override
     protected Response tokenExchange() {
         // validate subject token
         AuthenticationManager.AuthResult subjectAuthResult = processSubjectToken();
@@ -96,8 +101,15 @@ public class TokenExchangeDelegationProvider extends StandardTokenExchangeProvid
         UserSessionModel actorSession = actorAuthResult.session();
         actorAccessToken = actorAuthResult.token();
 
+        boolean isClientDelegation = actorUser.getServiceAccountClientLink() != null;
+        if (isClientDelegation) {
+            event.detail(Details.ACTOR_TYPE, Details.ACTOR_TYPE_CLIENT);
+            event.detail(Details.ACTOR, actorAccessToken.getIssuedFor());
+        } else {
+            event.detail(Details.ACTOR_TYPE, Details.ACTOR_TYPE_USER);
+            event.detail(Details.ACTOR, actorUser.getUsername());
+        }
         event.detail(Details.ACTOR_ID, actorUser.getId());
-        event.detail(Details.ACTOR, actorUser.getUsername());
         if (actorAccessToken.getSessionId() != null) {
             event.detail(Details.ACTOR_SESSION_ID, actorSession.getId());
         }

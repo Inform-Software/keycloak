@@ -7,6 +7,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 
+import org.keycloak.OAuthErrorException;
 import org.keycloak.admin.client.resource.ClientResource;
 import org.keycloak.authorization.fgap.AdminPermissionsSchema;
 import org.keycloak.common.Profile;
@@ -48,6 +49,7 @@ import org.keycloak.testframework.ui.annotations.InjectPage;
 import org.keycloak.testframework.ui.page.OAuthGrantPage;
 import org.keycloak.testframework.util.ApiUtil;
 import org.keycloak.tests.admin.authz.fgap.PermissionTestUtils;
+import org.keycloak.tests.oauth.tokenexchange.DelegationAssertions.ExpectedActor;
 import org.keycloak.tests.utils.admin.AdminApiUtil;
 import org.keycloak.testsuite.util.AccountHelper;
 import org.keycloak.testsuite.util.oauth.AccessTokenResponse;
@@ -129,6 +131,64 @@ public class ClientDelegationTest {
         // perform the token exchange with delegation
         String actorToken = getActorToken();
         assertTokenExchangeSuccess(res.getAccessToken(), actorToken, serviceAccountUserId);
+
+        logout(res.getRefreshToken());
+    }
+
+
+    @Test
+    public void standardExchangeRejectsDelegationSubjectTokenWithoutActorToken() {
+        AccessTokenResponse res = loginWithDelegation(AGENT_DELEGATION_SCOPE);
+        assertScopeContains(res.getScope(), AGENT_DELEGATION_SCOPE);
+        assertMayActPresent(oauth.verifyToken(res.getAccessToken()), getServiceAccountUserId(), AGENT_CLIENT_ID);
+
+        AccessTokenResponse exchange = oauth.client(AGENT_CLIENT_ID, AGENT_CLIENT_SECRET)
+                .scope(null)                               
+                .tokenExchangeRequest(res.getAccessToken()) 
+                .actorToken(null)                           // no actor_token so delegation provider declines
+                .send();
+
+        Assertions.assertFalse(exchange.isSuccess(),
+                "standard exchange must reject a subject_token carrying may_act/act");
+        Assertions.assertEquals(OAuthErrorException.INVALID_REQUEST, exchange.getError());
+        EventAssertion.assertError(events.poll())
+                .type(EventType.TOKEN_EXCHANGE_ERROR)
+                .clientId(AGENT_CLIENT_ID)
+                .error(Errors.INVALID_REQUEST)
+                .details(Details.REASON, "subject_token with a 'may_act' or 'act' claim is not allowed for standard token exchange");
+
+        logout(res.getRefreshToken());
+    }
+
+    @Test
+    public void standardExchangeRejectsReExchangeOfAlreadyDelegatedToken() {
+        // Perform a legitimate delegation exchange to obtain a token that carries "act".
+        AccessTokenResponse res = loginWithDelegation(AGENT_DELEGATION_SCOPE);
+        String actorToken = getActorToken();
+        AccessTokenResponse delegated = oauth.client(AGENT_CLIENT_ID, AGENT_CLIENT_SECRET)
+                .tokenExchangeRequest(res.getAccessToken())
+                .actorToken(actorToken)
+                .actorTokenType(ACCESS_TOKEN_TYPE)
+                .send();
+        Assertions.assertTrue(delegated.isSuccess(), delegated.getError() + " - " + delegated.getErrorDescription());
+        events.poll();
+        assertActPresent(oauth.verifyToken(delegated.getAccessToken()), getServiceAccountUserId(), AGENT_CLIENT_ID);
+
+        // Re-exchange that delegated token through STANDARD exchange with no actor_token and it must be rejected.
+        AccessTokenResponse reExchange = oauth.client(AGENT_CLIENT_ID, AGENT_CLIENT_SECRET)
+                .scope(null)
+                .tokenExchangeRequest(delegated.getAccessToken())
+                .actorToken(null)
+                .send();
+
+        Assertions.assertFalse(reExchange.isSuccess(),
+                "standard exchange must reject re-exchange of an already-delegated token carrying 'act'");
+        Assertions.assertEquals(OAuthErrorException.INVALID_REQUEST, reExchange.getError());
+        EventAssertion.assertError(events.poll())
+                .type(EventType.TOKEN_EXCHANGE_ERROR)
+                .clientId(AGENT_CLIENT_ID)
+                .error(Errors.INVALID_REQUEST)
+                .details(Details.REASON, "subject_token with a 'may_act' or 'act' claim is not allowed for standard token exchange");
 
         logout(res.getRefreshToken());
     }
@@ -226,8 +286,9 @@ public class ClientDelegationTest {
 
         // token exchange should not work without may_act claim
         String actorToken = getActorToken();
+        ExpectedActor clientActor = new ExpectedActor(Details.ACTOR_TYPE_CLIENT, AGENT_CLIENT_ID, getServiceAccountUserId());
         assertTokenExchangeError(AGENT_CLIENT_ID, AGENT_CLIENT_SECRET, res.getAccessToken(), actorToken,
-                AGENT_CLIENT_ID, "Invalid may_act claim in the subject_token");
+                AGENT_CLIENT_ID, "Invalid may_act claim in the subject_token", clientActor);
 
         logout(res.getRefreshToken());
     }
@@ -273,8 +334,9 @@ public class ClientDelegationTest {
 
         // actor token is from agent-app (azp = "agent-app") but may_act.client_id is "wrong-client"
         String actorToken = getActorToken();
+        ExpectedActor clientActor = new ExpectedActor(Details.ACTOR_TYPE_CLIENT, AGENT_CLIENT_ID, getServiceAccountUserId());
         assertTokenExchangeError(AGENT_CLIENT_ID, AGENT_CLIENT_SECRET, res.getAccessToken(), actorToken,
-                AGENT_CLIENT_ID, "Actor token client does not match the client_id in the may_act claim");
+                AGENT_CLIENT_ID, "Actor token client does not match the client_id in the may_act claim", clientActor);
 
         logout(res.getRefreshToken());
     }
@@ -286,8 +348,9 @@ public class ClientDelegationTest {
 
         // test-app tries to perform the exchange instead of agent-app — should fail
         String actorToken = getActorToken();
+        ExpectedActor clientActor = new ExpectedActor(Details.ACTOR_TYPE_CLIENT, AGENT_CLIENT_ID, getServiceAccountUserId());
         assertTokenExchangeError(TEST_CLIENT_ID, TEST_CLIENT_SECRET, res.getAccessToken(), actorToken,
-                TEST_CLIENT_ID, "Requesting client does not match the client_id in the may_act claim");
+                TEST_CLIENT_ID, "Requesting client does not match the client_id in the may_act claim", clientActor);
 
         logout(res.getRefreshToken());
     }
@@ -302,8 +365,10 @@ public class ClientDelegationTest {
                 .doPasswordGrantRequest("otheruser", PASSWORD).getAccessToken();
         events.poll(); // consume the login event
 
+        String otherUserId = AdminApiUtil.findUserByUsername(realm.admin(), OTHER_USERNAME).getId();
+        ExpectedActor userActor = new ExpectedActor(Details.ACTOR_TYPE_USER, OTHER_USERNAME, otherUserId);
         assertTokenExchangeError(AGENT_CLIENT_ID, AGENT_CLIENT_SECRET, res.getAccessToken(), wrongActorToken,
-                AGENT_CLIENT_ID, "Actor user is not allowed by the may_act claim inside the subject_token");
+                AGENT_CLIENT_ID, "Actor user is not allowed by the may_act claim inside the subject_token", userActor);
 
         logout(res.getRefreshToken());
     }
@@ -374,13 +439,13 @@ public class ClientDelegationTest {
                 .send();
         Assertions.assertTrue(tokenExchangeRes.isSuccess(), tokenExchangeRes.getError() + " - " + tokenExchangeRes.getErrorDescription());
 
-        String serviceAccountUsername = "service-account-" + AGENT_CLIENT_ID;
         EventAssertion.assertSuccess(events.poll())
                 .type(EventType.TOKEN_EXCHANGE)
                 .clientId(AGENT_CLIENT_ID)
                 .hasUserId()
                 .details(Details.USERNAME, USERNAME)
-                .details(Details.ACTOR, serviceAccountUsername)
+                .details(Details.ACTOR_TYPE, Details.ACTOR_TYPE_CLIENT)
+                .details(Details.ACTOR, AGENT_CLIENT_ID)
                 .details(Details.ACTOR_ID, expectedActorId)
                 .details(Details.REQUESTED_TOKEN_TYPE, ACCESS_TOKEN_TYPE)
                 .details(Details.SUBJECT_TOKEN_CLIENT_ID, TEST_CLIENT_ID);
@@ -403,7 +468,8 @@ public class ClientDelegationTest {
 
     private void assertTokenExchangeError(String requestingClientId, String requestingClientSecret,
                                            String subjectToken, String actorToken,
-                                           String expectedEventClientId, String expectedReason) {
+                                           String expectedEventClientId, String expectedReason,
+                                           ExpectedActor expectedActor) {
         AccessTokenResponse tokenExchangeRes = oauth.client(requestingClientId, requestingClientSecret)
                 .tokenExchangeRequest(subjectToken)
                 .actorToken(actorToken).actorTokenType(ACCESS_TOKEN_TYPE).send();
@@ -412,7 +478,10 @@ public class ClientDelegationTest {
                 .type(EventType.TOKEN_EXCHANGE_ERROR)
                 .clientId(expectedEventClientId)
                 .error(Errors.INVALID_TOKEN)
-                .details(Details.REASON, expectedReason);
+                .details(Details.REASON, expectedReason)
+                .details(Details.ACTOR_TYPE, expectedActor.type())
+                .details(Details.ACTOR, expectedActor.actor())
+                .details(Details.ACTOR_ID, expectedActor.id());
     }
 
     private void logout(String refreshToken) {
@@ -468,8 +537,6 @@ public class ClientDelegationTest {
         @Override
         public ClientBuilder configure(ClientBuilder client) {
             return super.configure(client)
-                    .defaultClientScopes("acr", "basic", "email", "profile")
-                    .optionalClientScopes(OIDCLoginProtocolFactory.CLIENT_DELEGATION_SCOPE)
                     .consentRequired(true)
                     .attribute(OIDCConfigAttributes.STANDARD_TOKEN_EXCHANGE_ENABLED, Boolean.TRUE.toString());
         }

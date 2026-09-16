@@ -271,6 +271,7 @@ public class OIDCLoginProtocol implements LoginProtocol {
         String code = null;
         if (responseType.hasResponseType(OIDCResponseType.CODE)) {
             OAuth2Code codeData = new OAuth2Code(SecretGenerator.getInstance().generateSecureID(),
+                authSession.getClient().getId(),
                 Time.currentTime() + userSession.getRealm().getAccessCodeLifespan(),
                 nonce,
                 authSession.getClientNote(OAuth2Constants.SCOPE),
@@ -550,7 +551,7 @@ public class OIDCLoginProtocol implements LoginProtocol {
         int authTimeInt = authTime == null ? 0 : Integer.parseInt(authTime);
         int maxAgeInt = Integer.parseInt(maxAge);
 
-        if (authTimeInt + maxAgeInt < Time.currentTime()) {
+        if ((long) authTimeInt + maxAgeInt < Time.currentTime()) {
             logger.debugf("Authentication time is expired, needs to reauthenticate. userSession=%s, clientId=%s, maxAge=%d, authTime=%d", userSession.getId(),
                 authSession.getClient().getId(), maxAgeInt, authTimeInt);
             return true;
@@ -569,7 +570,7 @@ public class OIDCLoginProtocol implements LoginProtocol {
             String authTime = userSession.getNote(AuthenticationManager.AUTH_TIME);
             int authTimeInt = authTime == null ? 0 : Integer.parseInt(authTime);
             int maxAgeInt = requiredActionProvider.getMaxAuthAge(session);
-            return authTimeInt + maxAgeInt < Time.currentTime();
+            return (long) authTimeInt + maxAgeInt < Time.currentTime();
         } else {
             return false;
         }
