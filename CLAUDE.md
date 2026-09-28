@@ -206,6 +206,9 @@ pom-stamped; they stay as they are.
 - **Tags only**, though nothing enforces it. A branch name containing `/` is illegal in a Docker
   tag and fails at the push step *after* the ~20-minute build; a slash-free branch name is worse
   still — it succeeds and publishes a mutable, mislabelled image.
+- **Two image tags per run:** `<tag>` (moves on every re-dispatch) and `<tag>-<YYYYMMDDTHHMMSSZ>`
+  (immutable). Only the source is pinned — the UBI base images and their `dnf` packages are
+  whatever Red Hat serves that day. Pin or cite the stamped tag; labels stay at `<tag>`.
 - **`linux/amd64` only** — a consequence of the `ubuntu-latest` runner, not an explicit pin: no
   `platforms:` key is set, and none is wanted, because the consumer pins
   `ARG IMAGE_PLATFORM=linux/amd64`.
