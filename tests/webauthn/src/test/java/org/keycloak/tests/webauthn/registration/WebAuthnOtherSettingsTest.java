@@ -19,6 +19,7 @@ package org.keycloak.tests.webauthn.registration;
 
 import java.io.Serializable;
 import java.util.List;
+import java.util.function.Consumer;
 
 import org.keycloak.WebAuthnConstants;
 import org.keycloak.authentication.requiredactions.WebAuthnPasswordlessRegisterFactory;
@@ -34,6 +35,7 @@ import org.keycloak.representations.idm.RealmRepresentation;
 import org.keycloak.representations.idm.UserRepresentation;
 import org.keycloak.testframework.annotations.KeycloakIntegrationTest;
 import org.keycloak.testframework.events.EventAssertion;
+import org.keycloak.testframework.realm.WebAuthnRealmData;
 import org.keycloak.testframework.ui.webdriver.BrowserType;
 import org.keycloak.tests.utils.admin.AdminApiUtil;
 import org.keycloak.tests.webauthn.AbstractWebAuthnVirtualTest;
@@ -46,9 +48,13 @@ import com.webauthn4j.data.attestation.statement.COSEKeyType;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.openqa.selenium.virtualauthenticator.VirtualAuthenticatorOptions;
 
 import static org.hamcrest.CoreMatchers.anyOf;
 import static org.hamcrest.CoreMatchers.containsString;
+import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.CoreMatchers.not;
+import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.CoreMatchers.nullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
 
@@ -121,7 +127,7 @@ public class WebAuthnOtherSettingsTest extends AbstractWebAuthnVirtualTest {
         final int timeout = 3; // seconds
 
         getVirtualAuthManager().removeAuthenticator();
-        setWebAuthnPolicyCreateTimeout(timeout);
+        managedRealm.updateWithCleanup(r1 -> r1.webAuthn(isPasswordless(), builder -> builder.timeout(timeout)));
 
         RealmRepresentation realmRep = managedRealm.admin().toRepresentation();
         Assertions.assertEquals(timeout, isPasswordless() ? realmRep.getWebAuthnPolicyPasswordlessCreateTimeout() : realmRep.getWebAuthnPolicyCreateTimeout());
@@ -149,16 +155,23 @@ public class WebAuthnOtherSettingsTest extends AbstractWebAuthnVirtualTest {
 
     @Test
     public void acceptableAaguidsShouldBeEmptyOrNullByDefault() {
-        assertThat(getAcceptableAaguids(), anyOf(nullValue(), Matchers.empty()));
+        WebAuthnRealmData realmData = new WebAuthnRealmData(managedRealm.admin().toRepresentation(), isPasswordless());
+        assertThat(realmData.getAcceptableAaguids(), anyOf(nullValue(), Matchers.empty()));
     }
 
     @Test
     public void excludeCredentials() {
-        setAcceptableAaguidsWithDirectAttestation(List.of(ALL_ZERO_AAGUID));
+        managedRealm.updateWithCleanup(
+                r -> r.webAuthn(isPasswordless(), builder -> builder
+                        .acceptableAaguids(List.of(ALL_ZERO_AAGUID))
+                        .attestationConveyancePreference(AttestationConveyancePreference.DIRECT.getValue())
+                )
+        );
 
         disableTruststoreSpi();
         try {
-            Assertions.assertEquals(List.of(ALL_ZERO_AAGUID), getAcceptableAaguids());
+            WebAuthnRealmData realmData = new WebAuthnRealmData(managedRealm.admin().toRepresentation(), isPasswordless());
+            Assertions.assertEquals(List.of(ALL_ZERO_AAGUID), realmData.getAcceptableAaguids());
 
             registerDefaultUser();
 
@@ -171,11 +184,17 @@ public class WebAuthnOtherSettingsTest extends AbstractWebAuthnVirtualTest {
 
     @Test
     public void excludeCredentialsSuccess() {
-        setAcceptableAaguidsWithDirectAttestation(List.of(CHROME_AAGUID));
+        managedRealm.updateWithCleanup(
+                r -> r.webAuthn(isPasswordless(), builder -> builder
+                        .acceptableAaguids(List.of(CHROME_AAGUID))
+                        .attestationConveyancePreference(AttestationConveyancePreference.DIRECT.getValue())
+                )
+        );
 
         disableTruststoreSpi();
         try {
-            Assertions.assertEquals(List.of(CHROME_AAGUID), getAcceptableAaguids());
+            WebAuthnRealmData realmData = new WebAuthnRealmData(managedRealm.admin().toRepresentation(), isPasswordless());
+            Assertions.assertEquals(List.of(CHROME_AAGUID), realmData.getAcceptableAaguids());
 
             registerDefaultUser();
 
@@ -188,9 +207,10 @@ public class WebAuthnOtherSettingsTest extends AbstractWebAuthnVirtualTest {
     @Test
     public void excludeCredentialsUsingNone() {
         // Acceptable AAGUIDs restricted, but attestation left at the default (none): registration must be rejected
-        setAcceptableAaguids(List.of(ALL_ZERO_AAGUID));
+        managedRealm.updateWithCleanup(r -> r.webAuthn(isPasswordless(), builder -> builder.acceptableAaguids(List.of(ALL_ZERO_AAGUID))));
 
-        Assertions.assertEquals(List.of(ALL_ZERO_AAGUID), getAcceptableAaguids());
+        WebAuthnRealmData realmData = new WebAuthnRealmData(managedRealm.admin().toRepresentation(), isPasswordless());
+        Assertions.assertEquals(List.of(ALL_ZERO_AAGUID), realmData.getAcceptableAaguids());
 
         registerDefaultUser();
 
@@ -201,7 +221,7 @@ public class WebAuthnOtherSettingsTest extends AbstractWebAuthnVirtualTest {
     @Test
     public void apiNotAllowedErrorMessage() {
         // Short timeout so the test doesn't wait long for the ceremony to fail.
-        setWebAuthnPolicyCreateTimeout(3);
+        managedRealm.updateWithCleanup(r -> r.webAuthn(isPasswordless(), wAuthN -> wAuthN.timeout(3)));
 
         oAuthClient.openRegistrationForm();
         registerPage.assertCurrent();
@@ -246,7 +266,7 @@ public class WebAuthnOtherSettingsTest extends AbstractWebAuthnVirtualTest {
 
     @Test
     public void apiSecurityErrorMessage() {
-        setWebAuthnPolicyRpId("invalid.example.com");
+        managedRealm.updateWithCleanup(r1 -> r1.webAuthn(isPasswordless(), builder -> builder.rpId("invalid.example.com")));
 
         oAuthClient.openRegistrationForm();
         registerPage.assertCurrent();
@@ -261,43 +281,74 @@ public class WebAuthnOtherSettingsTest extends AbstractWebAuthnVirtualTest {
         assertThat(webAuthnErrorPage.getError(), containsString("A security error occurred during the Passkey operation. Please ensure you are on the correct site and try again."));
     }
 
+    @Test
+    public void registrationFailsWhenChallengeAlreadyClaimed() {
+        oAuthClient.openRegistrationForm();
+        registerPage.assertCurrent();
+        registerPage.register("firstName", "lastName", EMAIL, USERNAME, PASSWORD);
+
+        webAuthnRegisterPage.assertCurrent();
+        String userId = AdminApiUtil.findUserByUsername(managedRealm.admin(), USERNAME).getId();
+        managedRealm.cleanup().add(r -> r.users().get(userId).remove());
+
+        String challenge = webAuthnRegisterPage.getChallenge();
+        assertThat("Challenge should be present in the page", challenge, is(notNullValue()));
+        String claimKey = WebAuthnConstants.AUTH_CHALLENGE_NOTE + ":" + challenge;
+
+        // Verify the single-use object was created for this challenge
+        boolean exists = runOnServer.fetch(session -> session.singleUseObjects().contains(claimKey), Boolean.class);
+        assertThat("Single-use object should exist for the issued challenge", exists, is(true));
+
+        // Simulate a concurrent request on another node that already consumed this challenge
+        runOnServer.run(session -> session.singleUseObjects().remove(claimKey));
+
+        webAuthnRegisterPage.clickRegister();
+
+        webAuthnErrorPage.assertCurrent();
+        assertThat(webAuthnErrorPage.getError(), containsString("Failed to register your Passkey."));
+
+        assertThat("No credential should be created when challenge was already claimed", getWebAuthnCredentialCount(userId), is(0L));
+
+        // Retry should issue a new challenge and succeed
+        webAuthnErrorPage.clickTryAgain();
+        webAuthnRegisterPage.assertCurrent();
+
+        String newChallenge = webAuthnRegisterPage.getChallenge();
+        assertThat("Retry should generate a new challenge", newChallenge, is(not(challenge)));
+
+        webAuthnRegisterPage.clickRegister();
+        webAuthnRegisterPage.registerWebAuthnCredential("test-credential");
+        assertThat(oAuthClient.parseLoginResponse().isSuccess(), is(true));
+
+        assertThat("Exactly one credential after successful retry", getWebAuthnCredentialCount(userId), is(1L));
+    }
+
+    private long getWebAuthnCredentialCount(String userId) {
+        return managedRealm.admin().users().get(userId).credentials().stream()
+                .filter(c -> getCredentialType().equals(c.getType()))
+                .count();
+    }
+
+    private void assertBrowserApiErrorMessage(Consumer<VirtualAuthenticatorOptions> optionsConsumer, String expectedMessage) {
+        getVirtualAuthManager().removeAuthenticator();
+        VirtualAuthenticatorOptions options = getDefaultAuthenticatorOptions();
+        optionsConsumer.accept(options);
+        getVirtualAuthManager().useAuthenticator(options);
+
+        oAuthClient.openRegistrationForm();
+        registerPage.assertCurrent();
+        registerPage.register("firstName", "lastName", EMAIL, USERNAME, PASSWORD);
+        webAuthnRegisterPage.assertCurrent();
+        String userId = AdminApiUtil.findUserByUsername(managedRealm.admin(), USERNAME).getId();
+        managedRealm.cleanup().add(r -> r.users().get(userId).remove());
+
+        webAuthnRegisterPage.clickRegister();
+
+        webAuthnErrorPage.assertCurrent();
+        assertThat(webAuthnErrorPage.getError(), containsString(expectedMessage));
+    }
     private String registerProviderId() {
         return isPasswordless() ? WebAuthnPasswordlessRegisterFactory.PROVIDER_ID : WebAuthnRegisterFactory.PROVIDER_ID;
-    }
-
-    private List<String> getAcceptableAaguids() {
-        RealmRepresentation realmRep = managedRealm.admin().toRepresentation();
-        return isPasswordless() ? realmRep.getWebAuthnPolicyPasswordlessAcceptableAaguids() : realmRep.getWebAuthnPolicyAcceptableAaguids();
-    }
-
-    private void setWebAuthnPolicyCreateTimeout(int timeout) {
-        managedRealm.updateWithCleanup(r -> isPasswordless()
-                ? r.webAuthnPolicyPasswordlessCreateTimeout(timeout)
-                : r.webAuthnPolicyCreateTimeout(timeout));
-    }
-
-    private void setWebAuthnPolicyRpId(String rpId) {
-        managedRealm.updateWithCleanup(r -> isPasswordless()
-                ? r.webAuthnPolicyPasswordlessRpId(rpId)
-                : r.webAuthnPolicyRpId(rpId));
-    }
-
-    private void setAcceptableAaguids(List<String> aaguids) {
-        managedRealm.updateWithCleanup(r -> isPasswordless()
-                ? r.webAuthnPolicyPasswordlessAcceptableAaguids(aaguids)
-                : r.webAuthnPolicyAcceptableAaguids(aaguids));
-    }
-
-    private void setAcceptableAaguidsWithDirectAttestation(List<String> aaguids) {
-        final String direct = AttestationConveyancePreference.DIRECT.getValue();
-        managedRealm.updateWithCleanup(r -> {
-            if (isPasswordless()) {
-                r.webAuthnPolicyPasswordlessAcceptableAaguids(aaguids).webAuthnPolicyPasswordlessAttestationConveyancePreference(direct);
-            } else {
-                r.webAuthnPolicyAcceptableAaguids(aaguids).webAuthnPolicyAttestationConveyancePreference(direct);
-            }
-            return r;
-        });
     }
 
     public static class CredentialData implements Serializable {

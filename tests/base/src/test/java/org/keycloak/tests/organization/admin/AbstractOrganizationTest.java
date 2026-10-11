@@ -17,11 +17,13 @@
 
 package org.keycloak.tests.organization.admin;
 
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
+import jakarta.mail.internet.MimeMessage;
 import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.Response.Status;
@@ -39,12 +41,15 @@ import org.keycloak.representations.idm.ClientScopeRepresentation;
 import org.keycloak.representations.idm.GroupRepresentation;
 import org.keycloak.representations.idm.IdentityProviderRepresentation;
 import org.keycloak.representations.idm.MemberRepresentation;
+import org.keycloak.representations.idm.MembershipType;
 import org.keycloak.representations.idm.OrganizationDomainRepresentation;
+import org.keycloak.representations.idm.OrganizationIdentityProviderLinkRepresentation;
 import org.keycloak.representations.idm.OrganizationRepresentation;
 import org.keycloak.representations.idm.ProtocolMapperRepresentation;
 import org.keycloak.representations.idm.RequiredActionProviderRepresentation;
 import org.keycloak.representations.idm.UserRepresentation;
 import org.keycloak.testframework.annotations.InjectRealm;
+import org.keycloak.testframework.mail.MailServer;
 import org.keycloak.testframework.oauth.OAuthClient;
 import org.keycloak.testframework.realm.ClientBuilder;
 import org.keycloak.testframework.realm.CredentialBuilder;
@@ -58,6 +63,7 @@ import org.keycloak.testframework.ui.page.LoginPage;
 import org.keycloak.testframework.ui.page.LoginUpdateProfilePage;
 import org.keycloak.testframework.ui.page.LoginUsernamePage;
 import org.keycloak.testframework.util.ApiUtil;
+import org.keycloak.tests.utils.MailUtils;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -144,6 +150,22 @@ public abstract class AbstractOrganizationTest {
         return org;
     }
 
+    /** Creates an organization with a real OIDC broker and the requested membership policy. */
+    protected OrganizationResource createOrganizationWithBroker(ManagedRealm providerRealm, boolean autoMembership,
+            MembershipType membershipType) {
+        String idpAlias = organizationName + "-identity-provider";
+        OrganizationRepresentation org = createOrganization(realm, organizationName,
+                createRealOrgBroker(idpAlias, providerRealm), organizationName + ".org");
+        OrganizationResource organization = realm.admin().organizations().get(org.getId());
+        OrganizationIdentityProviderLinkRepresentation link = new OrganizationIdentityProviderLinkRepresentation();
+        link.setAutoMembership(autoMembership);
+        link.setMembershipType(membershipType.name());
+        try (Response response = organization.identityProviders().get(idpAlias).update(link)) {
+            assertEquals(Status.NO_CONTENT.getStatusCode(), response.getStatus());
+        }
+        return organization;
+    }
+
     protected OrganizationRepresentation createRepresentation(String name, String... orgDomains) {
         OrganizationRepresentation org = new OrganizationRepresentation();
         org.setName(name);
@@ -222,6 +244,13 @@ public abstract class AbstractOrganizationTest {
         return reps.get(0);
     }
 
+    protected static String getInvitationLink(MailServer mailServer) throws IOException {
+        assertTrue(mailServer.waitForIncomingEmail(10_000, 1), "invitation email not received");
+        MimeMessage message = mailServer.getLastReceivedMessage();
+        assertNotNull(message);
+        return MailUtils.getLink(MailUtils.getBody(message).getHtml()).trim();
+    }
+
     protected GroupRepresentation createGroup(RealmResource realmResource, String name) {
         GroupRepresentation group = new GroupRepresentation();
         group.setName(name);
@@ -280,15 +309,15 @@ public abstract class AbstractOrganizationTest {
     /**
      * Performs identity-first login through a broker: enters email on the consumer realm login page,
      * follows the redirect to the provider realm, fills credentials, and optionally handles first-time
-     * login profile update. Registers cleanup for the federated user created in the consumer realm.
+     * login profile update. Returns the federated user in the consumer realm and registers its cleanup.
      */
-    protected void loginViaBroker(String email, String username, String password,
+    protected UserRepresentation loginViaBroker(String email, String username, String password,
             OAuthClient oauth, LoginUsernamePage loginUsernamePage, LoginPage loginPage,
             ManagedRealm providerRealm) {
-        loginViaBroker(email, username, password, null, oauth, loginUsernamePage, loginPage, null, providerRealm);
+        return loginViaBroker(email, username, password, null, oauth, loginUsernamePage, loginPage, null, providerRealm);
     }
 
-    protected void loginViaBroker(String email, String username, String password,
+    protected UserRepresentation loginViaBroker(String email, String username, String password,
             String updateEmail, OAuthClient oauth, LoginUsernamePage loginUsernamePage,
             LoginPage loginPage, LoginUpdateProfilePage loginUpdateProfilePage,
             ManagedRealm providerRealm) {
@@ -319,20 +348,22 @@ public abstract class AbstractOrganizationTest {
                 r.users().get(userId).remove();
             } catch (NotFoundException ignored) {}
         });
+        return users.get(0);
     }
 
     /**
      * Performs broker registration and verifies the user becomes an organization member.
      * Equivalent to the old AbstractOrganizationTest.assertBrokerRegistration().
      */
-    protected void assertBrokerRegistration(OrganizationResource organization,
+    protected UserRepresentation assertBrokerRegistration(OrganizationResource organization,
             String username, String email,
             OAuthClient oauth, LoginUsernamePage loginUsernamePage, LoginPage loginPage,
             LoginUpdateProfilePage loginUpdateProfilePage, ManagedRealm providerRealm) {
-        loginViaBroker(email, username, "password", email,
+        UserRepresentation user = loginViaBroker(email, username, "password", email,
                 oauth, loginUsernamePage, loginPage, loginUpdateProfilePage, providerRealm);
 
         assertIsMember(email, organization);
+        return user;
     }
 
     protected void assertIsMember(String userEmail, OrganizationResource organization) {
