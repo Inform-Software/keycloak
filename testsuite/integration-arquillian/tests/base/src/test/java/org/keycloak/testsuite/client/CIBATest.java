@@ -42,6 +42,7 @@ import org.keycloak.events.Details;
 import org.keycloak.events.Errors;
 import org.keycloak.events.EventType;
 import org.keycloak.models.CibaConfig;
+import org.keycloak.models.Constants;
 import org.keycloak.protocol.oidc.OIDCAdvancedConfigWrapper;
 import org.keycloak.protocol.oidc.grants.ciba.CibaGrantType;
 import org.keycloak.protocol.oidc.grants.ciba.CibaGrantTypeFactory;
@@ -764,6 +765,78 @@ public class CIBATest extends AbstractClientPoliciesTest {
         additionalParameters.put(OAuth2Constants.CLIENT_ID, TEST_CLIENT_NAME);
         additionalParameters.put(OAuth2Constants.CLIENT_SECRET, TEST_CLIENT_PASSWORD);
         testBackchannelAuthenticationFlow(true, "ABCDE", additionalParameters);
+    }
+
+    @Test
+    public void testBackchannelAuthenticationFlowNotAllowedForPublicClient() throws Exception {
+        final String username = "nutzername-rot";
+        final String bindingMessage = "public-client-ciba";
+        final String clientId = generateSuffixedName("confidential-app");
+        final String clientSecret = "app-secret";
+
+        String cid = createClientByAdmin(clientId, (ClientRepresentation clientRep) -> {
+            clientRep.setSecret(clientSecret);
+            clientRep.setPublicClient(Boolean.FALSE);
+            Map<String, String> attributes = Optional.ofNullable(clientRep.getAttributes()).orElse(new HashMap<>());
+            attributes.put(CibaConfig.CIBA_BACKCHANNEL_TOKEN_DELIVERY_MODE_PER_CLIENT, "poll");
+            attributes.put(CibaConfig.OIDC_CIBA_GRANT_ENABLED, Boolean.TRUE.toString());
+            clientRep.setAttributes(attributes);
+        });
+
+        // the user authenticates while the client is still confidential
+        AuthenticationRequestAcknowledgement response = doBackchannelAuthenticationRequest(clientId, clientSecret, username, bindingMessage);
+        doAuthenticationChannelCallback(doAuthenticationChannelRequest(bindingMessage));
+
+        updateClientByAdmin(cid, (ClientRepresentation clientRep) -> clientRep.setPublicClient(Boolean.TRUE));
+        oauth.client(clientId);
+
+        // Token Request with a valid auth_req_id
+        AccessTokenResponse tokenRes = oauth.ciba().doBackchannelAuthenticationTokenRequest(response.getAuthReqId());
+        assertThat(tokenRes.getStatusCode(), is(equalTo(401)));
+        assertThat(tokenRes.getError(), is(OAuthErrorException.UNAUTHORIZED_CLIENT));
+
+        // Backchannel Authentication Request
+        AuthenticationRequestAcknowledgement publicClientResponse = oauth.ciba().backchannelAuthenticationRequest(username).bindingMessage(bindingMessage).send();
+        assertThat(publicClientResponse.getStatusCode(), is(equalTo(401)));
+        assertThat(publicClientResponse.getError(), is(OAuthErrorException.INVALID_CLIENT));
+    }
+
+    @Test
+    public void testBackchannelAuthenticationRequestUsesClientMinimumAcr() throws Exception {
+        ClientResource clientResource = null;
+        ClientRepresentation clientRep = null;
+        try {
+            final String username = "nutzername-rot";
+            final String bindingMessage = "min-acr-ciba";
+
+            clientResource = AdminApiUtil.findClientByClientId(managedRealm.admin(), TEST_CLIENT_NAME);
+            clientRep = clientResource.toRepresentation();
+            prepareCIBASettings(clientResource, clientRep);
+
+            Map<String, Integer> acrLoaMap = new HashMap<>();
+            acrLoaMap.put("copper", 0);
+            acrLoaMap.put("silver", 1);
+            acrLoaMap.put("gold", 2);
+            clientRep.getAttributes().put(Constants.ACR_LOA_MAP, JsonSerialization.writeValueAsString(acrLoaMap));
+            OIDCAdvancedConfigWrapper.fromClientRepresentation(clientRep).setMinimumAcrValue("gold");
+            clientResource.update(clientRep);
+
+            // No acr_values on the backchannel request — client minimum ACR must still be forwarded
+            AuthenticationRequestAcknowledgement response = doBackchannelAuthenticationRequest(TEST_CLIENT_NAME, TEST_CLIENT_PASSWORD, username, bindingMessage);
+
+            TestAuthenticationChannelRequest testRequest = doAuthenticationChannelRequest(bindingMessage);
+            AuthenticationChannelRequest authenticationChannelReq = testRequest.getRequest();
+            assertThat(authenticationChannelReq.getAcrValues(), is(equalTo("gold")));
+
+            doAuthenticationChannelCallback(testRequest);
+            doBackchannelAuthenticationTokenRequest(username, response.getAuthReqId());
+        } finally {
+            if (clientRep != null) {
+                clientRep.getAttributes().remove(Constants.ACR_LOA_MAP);
+                OIDCAdvancedConfigWrapper.fromClientRepresentation(clientRep).setMinimumAcrValue(null);
+            }
+            revertCIBASettings(clientResource, clientRep);
+        }
     }
 
     @Test
@@ -2354,9 +2427,9 @@ public class CIBATest extends AbstractClientPoliciesTest {
 
         // user Backchannel Authentication Request
         AuthenticationRequestAcknowledgement response = oauth.ciba().backchannelAuthenticationRequest(username).bindingMessage(bindingMessage).additionalParams(additionalParameters).send();
-        assertThat(response.getStatusCode(), is(equalTo(400)));
+        assertThat(response.getStatusCode(), is(equalTo(401)));
         assertThat(response.getError(), is(OAuthErrorException.INVALID_CLIENT));
-        assertThat(response.getErrorDescription(), is("invalid client access type: public"));
+        assertThat(response.getErrorDescription(), is("Public client not allowed"));
 
         String clientConfidentialId = generateSuffixedName("confidential-app");
         String clientConfidentialSecret = "app-secret";
@@ -2382,9 +2455,9 @@ public class CIBATest extends AbstractClientPoliciesTest {
         // user Token Request
         oauth.client(clientConfidentialId, clientConfidentialSecret);
         AccessTokenResponse tokenRes = oauth.ciba().doBackchannelAuthenticationTokenRequest(response.getAuthReqId());
-        assertThat(tokenRes.getStatusCode(), is(equalTo(400)));
-        assertThat(tokenRes.getError(), is(OAuthErrorException.INVALID_GRANT));
-        assertThat(tokenRes.getErrorDescription(), is("invalid client access type: public"));
+        assertThat(tokenRes.getStatusCode(), is(equalTo(401)));
+        assertThat(tokenRes.getError(), is(OAuthErrorException.UNAUTHORIZED_CLIENT));
+        assertThat(tokenRes.getErrorDescription(), is("Public client not allowed to use OIDC CIBA Grant"));
     }
 
     @Test

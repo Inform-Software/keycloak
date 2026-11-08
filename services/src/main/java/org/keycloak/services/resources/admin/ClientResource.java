@@ -16,7 +16,6 @@
  */
 package org.keycloak.services.resources.admin;
 
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -61,7 +60,6 @@ import org.keycloak.models.ModelDuplicateException;
 import org.keycloak.models.ModelValidationException;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserCredentialModel;
-import org.keycloak.models.UserModel;
 import org.keycloak.models.UserSessionModel;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.ModelToRepresentation;
@@ -76,7 +74,6 @@ import org.keycloak.representations.idm.ClientRepresentation;
 import org.keycloak.representations.idm.ClientScopeRepresentation;
 import org.keycloak.representations.idm.CredentialRepresentation;
 import org.keycloak.representations.idm.ManagementPermissionReference;
-import org.keycloak.representations.idm.UserRepresentation;
 import org.keycloak.representations.idm.UserSessionRepresentation;
 import org.keycloak.services.ErrorResponse;
 import org.keycloak.services.ErrorResponseException;
@@ -130,6 +127,8 @@ public class ClientResource {
     protected final KeycloakSession session;
 
     protected final ClientConnection clientConnection;
+
+    private final Map<String, Boolean> clientVisibility = new HashMap<>();
 
     public ClientResource(RealmModel realm, AdminPermissionEvaluator auth, ClientModel clientModel, KeycloakSession session, AdminEventBuilder adminEvent) {
         this.realm = realm;
@@ -216,12 +215,11 @@ public class ClientResource {
             StripSecretsUtils.stripClient(representation);
         }
 
-        if (!auth.clients().canViewClientScopes()) {
-            representation.setDefaultClientScopes(Collections.emptyList());
-            representation.setOptionalClientScopes(Collections.emptyList());
-        }
-
         representation.setAccess(auth.clients().getAccess(client));
+
+        if (client.isServiceAccountsEnabled()) {
+            ModelToRepresentation.setServiceAccountUserId(session, client, representation);
+        }
 
         return representation;
     }
@@ -259,7 +257,8 @@ public class ClientResource {
 
         ClientInstallationProvider provider = session.getProvider(ClientInstallationProvider.class, providerId);
         if (provider == null) throw new NotFoundException("Unknown Provider");
-        return provider.generateInstallation(session, realm, client, session.getContext().getUri().getBaseUri());
+        return provider.generateInstallation(session, realm, client, session.getContext().getUri().getBaseUri(),
+                auth.clients().canManage(client));
     }
 
     /**
@@ -402,7 +401,7 @@ public class ClientResource {
 
 
     /**
-     * Get default client scopes.  Only name and ids are returned.
+     * Get default client scopes, including their names, IDs, descriptions, and parameterized scope flags.
      *
      * @return
      */
@@ -411,7 +410,7 @@ public class ClientResource {
     @Produces(MediaType.APPLICATION_JSON)
     @Path("default-client-scopes")
     @Tag(name = KeycloakOpenAPI.Admin.Tags.CLIENTS)
-    @Operation( summary = "Get default client scopes.  Only name and ids are returned.")
+    @Operation( summary = "Get default client scopes, including their names, IDs, descriptions, and parameterized scope flags.")
     public Stream<ClientScopeRepresentation> getDefaultClientScopes() {
         return getDefaultClientScopes(true);
     }
@@ -419,11 +418,22 @@ public class ClientResource {
     private Stream<ClientScopeRepresentation> getDefaultClientScopes(boolean defaultScope) {
         auth.clients().requireView(client);
 
-        if (!auth.clients().canViewClientScopes()) {
-            return Stream.empty();
-        }
-
         return client.getClientScopes(defaultScope).values().stream().map(ClientResource::toRepresentation);
+    }
+
+    /**
+     * Get summaries of client scopes that can be assigned to this client.
+     */
+    @GET
+    @NoCache
+    @Produces(MediaType.APPLICATION_JSON)
+    @Path("available-client-scopes")
+    @Tag(name = KeycloakOpenAPI.Admin.Tags.CLIENTS)
+    @Operation(summary = "Get summaries of client scopes that can be assigned to this client")
+    public Stream<ClientScopeRepresentation> getAvailableClientScopes() {
+        auth.clients().requireManage(client);
+
+        return realm.getClientScopesStream().map(ClientResource::toRepresentation);
     }
 
 
@@ -443,9 +453,7 @@ public class ClientResource {
         if (clientScope == null) {
             throw new jakarta.ws.rs.NotFoundException("Client scope not found");
         }
-        
-        auth.clients().requireManage(clientScope);
-        
+
         // Parameterized scopes currently require the caller to explicitly provide the scope parameter (e.g. "scope_name:value"),
         // so they cannot be included automatically as default scopes. This restriction may be lifted in the future.
         if (defaultScope && clientScope.isParameterizedScope()) {
@@ -472,9 +480,7 @@ public class ClientResource {
         if (clientScope == null) {
             throw new jakarta.ws.rs.NotFoundException("Client scope not found");
         }
-        
-        auth.clients().requireManage(clientScope);
-        
+
         client.removeClientScope(clientScope);
 
         adminEvent.operation(OperationType.DELETE).resource(ResourceType.CLIENT_SCOPE_CLIENT_MAPPING).resourcePath(session.getContext().getUri()).success();
@@ -482,7 +488,7 @@ public class ClientResource {
 
 
     /**
-     * Get optional client scopes.  Only name and ids are returned.
+     * Get optional client scopes, including their names, IDs, descriptions, and parameterized scope flags.
      *
      * @return
      */
@@ -491,7 +497,7 @@ public class ClientResource {
     @Produces(MediaType.APPLICATION_JSON)
     @Path("optional-client-scopes")
     @Tag(name = KeycloakOpenAPI.Admin.Tags.CLIENTS)
-    @Operation( summary = "Get optional client scopes.  Only name and ids are returned.")
+    @Operation( summary = "Get optional client scopes, including their names, IDs, descriptions, and parameterized scope flags.")
     public Stream<ClientScopeRepresentation> getOptionalClientScopes() {
         return getDefaultClientScopes(false);
     }
@@ -517,26 +523,6 @@ public class ClientResource {
     @Path("evaluate-scopes")
     public ClientScopeEvaluateResource clientScopeEvaluateResource() {
         return new ClientScopeEvaluateResource(session, session.getContext().getUri(), realm, auth, client, clientConnection);
-    }
-
-    /**
-     * Get a user dedicated to the service account
-     *
-     * @return
-     */
-    @Path("service-account-user")
-    @GET
-    @NoCache
-    @Produces(MediaType.APPLICATION_JSON)
-    @Tag(name = KeycloakOpenAPI.Admin.Tags.CLIENTS)
-    @Operation( summary = "Get a user dedicated to the service account")
-    public UserRepresentation getServiceAccountUser() {
-        auth.clients().requireView(client);
-
-        UserModel user = new ClientManager(new RealmManager(session)).getServiceAccountUser(client)
-                .orElseThrow(() -> new BadRequestException("Service account not enabled for the client '" + client.getClientId() + "'"));
-
-        return ModelToRepresentation.toRepresentation(session, realm, user);
     }
 
     /**
@@ -603,7 +589,7 @@ public class ClientResource {
                         .readOnlyStreamUserSessions(client.getRealm(), client, -1, -1)
                         .filter(userSession -> auth.users().canView(userSession.getUser())),
                 computeFirstResult(firstResult), computeMaxResults(maxResults))
-                .map(ModelToRepresentation::toRepresentation);
+                .map(userSession -> ModelToRepresentation.toRepresentation(userSession, this::canViewClient));
     }
 
     /**
@@ -950,7 +936,7 @@ public class ClientResource {
      * @return a reference to the constructed representation.
      */
     private UserSessionRepresentation toUserSessionRepresentation(final UserSessionModel userSession) {
-        UserSessionRepresentation rep = ModelToRepresentation.toRepresentation(userSession);
+        UserSessionRepresentation rep = ModelToRepresentation.toRepresentation(userSession, this::canViewClient);
 
         // Update lastSessionRefresh with the timestamp from clientSession
         var clientSession = userSession.getAuthenticatedClientSessionByClient(client.getClientId());
@@ -960,10 +946,21 @@ public class ClientResource {
         return rep;
     }
 
+    /**
+     * Checks client view permission once per client for this request, as session listings repeat the same clients.
+     */
+    private boolean canViewClient(ClientModel client) {
+        return clientVisibility.computeIfAbsent(client.getId(), id -> auth.clients().canView(client));
+    }
+
     private static ClientScopeRepresentation toRepresentation(ClientScopeModel clientScopeModel) {
         ClientScopeRepresentation rep = new ClientScopeRepresentation();
         rep.setId(clientScopeModel.getId());
         rep.setName(clientScopeModel.getName());
+        rep.setProtocol(clientScopeModel.getProtocol());
+        rep.setDescription(clientScopeModel.getDescription());
+        // Assigned scope summaries only expose the attribute needed to display the scope type.
+        rep.setAttributes(Map.of(ClientScopeModel.IS_PARAMETERIZED_SCOPE, Boolean.toString(clientScopeModel.isParameterizedScope())));
         return rep;
     }
 
